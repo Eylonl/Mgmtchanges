@@ -11,15 +11,12 @@ import textwrap
 st.set_page_config(page_title="Management Changes Summary Extractor", layout="centered")
 st.title("📄 Management Changes Summary Extractor")
 
-# Inputs with more efficient defaults
+# Inputs with GPT-3.5-turbo as the default
 ticker = st.text_input("Enter Stock Ticker (e.g., MSFT, ORCL)", "MSFT").upper()
 api_key = st.text_input("Enter OpenAI API Key", type="password")
 year_input = st.text_input("How many years back to search? (Leave blank for most recent only)", "")
 quarter_input = st.text_input("OR enter specific quarter (e.g., 2Q25, Q4FY24)", "")
 model_choice = st.selectbox("Select OpenAI Model", ["gpt-3.5-turbo", "gpt-4-turbo", "gpt-4"], index=0)
-
-# Add a cost saving option
-use_cheaper_extraction = st.checkbox("Use cost-saving extraction (less detailed but cheaper)", value=True)
 
 @st.cache_data(show_spinner=False)
 def lookup_cik(ticker):
@@ -489,15 +486,8 @@ if st.button("🔍 Extract Management Changes"):
         else:
             client = OpenAI(api_key=api_key)
             
-            # Use a more efficient model by default for cost savings
-            if use_cheaper_extraction and model_choice == "gpt-4-turbo":
-                actual_model = "gpt-3.5-turbo"
-                st.info(f"Using {actual_model} for cost savings instead of {model_choice}")
-            elif use_cheaper_extraction and model_choice == "gpt-4":
-                actual_model = "gpt-4-turbo"
-                st.info(f"Using {actual_model} for cost savings instead of {model_choice}")
-            else:
-                actual_model = model_choice
+            # Use the selected model directly
+            actual_model = model_choice
             
             # Get fiscal year end to determine quarters
             fiscal_year_end_month, _ = get_fiscal_year_end(cik, display_message=True)
@@ -557,7 +547,7 @@ if st.button("🔍 Extract Management Changes"):
                                         ticker, 
                                         client, 
                                         fiscal_quarter,
-                                        model=actual_model
+                                        model=model_choice
                                     )
                                 
                                 if management_changes and "No management changes" not in management_changes:

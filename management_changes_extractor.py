@@ -473,25 +473,10 @@ def parse_management_changes_to_df(text, fiscal_quarter):
     else:
         return None
 
-def install_required_packages():
-    """Make sure openpyxl is installed for Excel support"""
-    try:
-        import importlib.util
-        if importlib.util.find_spec("openpyxl") is None:
-            st.warning("⚠️ Required package 'openpyxl' is not installed")
-            st.info("To enable Excel export, please install openpyxl using: pip install openpyxl")
-            return False
-        else:
-            return True
-    except Exception as e:
-        st.error(f"❌ Error checking for dependencies: {str(e)}")
-        st.info("If you're seeing Excel-related errors, please ensure the openpyxl package is installed")
-        return False
+# Remove the install_required_packages function entirely since we don't need it anymore
+
 
 if st.button("🔍 Extract Management Changes"):
-    # Make sure dependencies are installed
-    install_required_packages()
-    
     if not api_key:
         st.error("Please enter your OpenAI API key.")
     else:
@@ -559,52 +544,6 @@ if st.button("🔍 Extract Management Changes"):
                                     )
                                 
                                 if management_changes and "No management changes" not in management_changes:
-                                    # Format the display for JSON output
-                                    if management_changes.strip().startswith("{"):
-                                        import json
-                                        json_objects = management_changes.split("---")
-                                        
-                                        for idx, json_str in enumerate(json_objects):
-                                            try:
-                                                json_str = json_str.strip()
-                                                if not json_str:
-                                                    continue
-                                                    
-                                                change_data = json.loads(json_str)
-                                                
-                                                # Display in a clean card format
-                                                st.markdown(f"""
-                                                <div style="border:1px solid #d0d7de; border-radius:6px; padding:16px; margin-bottom:16px;">
-                                                    <h4 style="margin-top:0; color:#0969da;">
-                                                        {change_data.get('type', 'Management Change')} - {change_data.get('name', 'Executive')}
-                                                    </h4>
-                                                    <table style="width:100%;">
-                                                        <tr>
-                                                            <td style="width:25%; color:#57606a;"><strong>New Role:</strong></td>
-                                                            <td>{change_data.get('new_role', 'Not Specified')}</td>
-                                                        </tr>
-                                                        <tr>
-                                                            <td style="width:25%; color:#57606a;"><strong>Previous Role:</strong></td>
-                                                            <td>{change_data.get('previous_role', 'Not Specified')}</td>
-                                                        </tr>
-                                                        <tr>
-                                                            <td style="width:25%; color:#57606a;"><strong>Effective Date:</strong></td>
-                                                            <td>{change_data.get('effective_date', 'Not Specified')}</td>
-                                                        </tr>
-                                                        <tr>
-                                                            <td style="width:25%; color:#57606a;"><strong>Details:</strong></td>
-                                                            <td>{change_data.get('details', 'Not Specified')}</td>
-                                                        </tr>
-                                                    </table>
-                                                </div>
-                                                """, unsafe_allow_html=True)
-                                            except json.JSONDecodeError:
-                                                st.markdown(f"**Raw Change Data {idx+1}:**\n{json_str}")
-                                    else:
-                                        # Fall back to displaying as markdown for non-JSON format
-                                        st.markdown("### Extracted Management Changes")
-                                        st.markdown(management_changes)
-                                    
                                     # Parse to DataFrame
                                     df = parse_management_changes_to_df(management_changes, fiscal_quarter)
                                     
@@ -631,78 +570,24 @@ if st.button("🔍 Extract Management Changes"):
                 # Combine all results
                 combined = pd.concat(results, ignore_index=True)
                 
-                # Show summary statistics
-                st.subheader("📊 Management Changes Summary")
-                
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Total Changes", len(combined))
-                with col2:
-                    # Count by type
-                    type_counts = combined["Type"].value_counts()
-                    most_common_type = type_counts.index[0] if not type_counts.empty else "None"
-                    st.metric("Most Common Type", f"{most_common_type} ({type_counts.iloc[0]})" if not type_counts.empty else "None")
-                with col3:
-                    # Count by quarter
-                    quarter_counts = combined["Fiscal Quarter"].value_counts()
-                    most_active_quarter = quarter_counts.index[0] if not quarter_counts.empty else "None"
-                    st.metric("Most Active Quarter", f"{most_active_quarter} ({quarter_counts.iloc[0]})" if not quarter_counts.empty else "None")
-                
                 # Preview the table with filters
-                st.subheader("🔍 Management Changes Table")
-                
-                # Add filtering options
-                filter_col1, filter_col2 = st.columns(2)
-                with filter_col1:
-                    filter_type = st.multiselect(
-                        "Filter by Type",
-                        options=["All"] + sorted(combined["Type"].unique().tolist()),
-                        default=["All"]
-                    )
-                with filter_col2:
-                    filter_quarter = st.multiselect(
-                        "Filter by Quarter",
-                        options=["All"] + sorted(combined["Fiscal Quarter"].unique().tolist()),
-                        default=["All"]
-                    )
+                st.subheader("Management Changes")
                 
                 # Apply filters
                 filtered_df = combined.copy()
-                if filter_type and "All" not in filter_type:
-                    filtered_df = filtered_df[filtered_df["Type"].isin(filter_type)]
-                if filter_quarter and "All" not in filter_quarter:
-                    filtered_df = filtered_df[filtered_df["Fiscal Quarter"].isin(filter_quarter)]
                 
                 # Display the filtered table
                 st.dataframe(filtered_df, use_container_width=True)
                 
-                # Add download buttons
-                st.subheader("📥 Download Results")
-                
-                download_col1, download_col2 = st.columns(2)
-                
-                with download_col1:
-                    # CSV export for all data
-                    import io
-                    csv_buffer = io.StringIO()
-                    combined.to_csv(csv_buffer, index=False)
-                    st.download_button(
-                        "📥 Download All Data (CSV)", 
-                        data=csv_buffer.getvalue(), 
-                        file_name=f"{ticker}_management_changes.csv", 
-                        mime="text/csv"
-                    )
-                
-                with download_col2:
-                    # Download filtered data
-                    if not filtered_df.equals(combined):
-                        csv_buffer_filtered = io.StringIO()
-                        filtered_df.to_csv(csv_buffer_filtered, index=False)
-                        st.download_button(
-                            "📥 Download Filtered Data (CSV)", 
-                            data=csv_buffer_filtered.getvalue(), 
-                            file_name=f"{ticker}_filtered_management_changes.csv", 
-                            mime="text/csv"
-                        )
+                # Add single download button
+                import io
+                csv_buffer = io.StringIO()
+                combined.to_csv(csv_buffer, index=False)
+                st.download_button(
+                    "📥 Download CSV", 
+                    data=csv_buffer.getvalue(), 
+                    file_name=f"{ticker}_management_changes.csv", 
+                    mime="text/csv"
+                )
             else:
                 st.warning("No management change data extracted from any of the filings.")

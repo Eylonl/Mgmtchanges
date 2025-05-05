@@ -8,15 +8,18 @@ from openai import OpenAI
 import time
 import textwrap
 
-st.set_page_config(page_title="SEC 8-K Management Changes Extractor", layout="centered")
-st.title("📄 SEC 8-K Management Changes Extractor")
+st.set_page_config(page_title="Management Changes Summary Extractor", layout="centered")
+st.title("📄 Management Changes Summary Extractor")
 
-# Inputs
+# Inputs with more efficient defaults
 ticker = st.text_input("Enter Stock Ticker (e.g., MSFT, ORCL)", "MSFT").upper()
 api_key = st.text_input("Enter OpenAI API Key", type="password")
 year_input = st.text_input("How many years back to search? (Leave blank for most recent only)", "")
 quarter_input = st.text_input("OR enter specific quarter (e.g., 2Q25, Q4FY24)", "")
 model_choice = st.selectbox("Select OpenAI Model", ["gpt-3.5-turbo", "gpt-4-turbo", "gpt-4"], index=0)
+
+# Add a cost saving option
+use_cheaper_extraction = st.checkbox("Use cost-saving extraction (less detailed but cheaper)", value=True)
 
 @st.cache_data(show_spinner=False)
 def lookup_cik(ticker):
@@ -224,9 +227,9 @@ def find_management_change_paragraphs(text):
     
     if match:
         section_text = match.group(0)
-        # Limit to a reasonable length (8000 chars) to avoid token limits
-        if len(section_text) > 8000:
-            section_text = section_text[:8000] + "...[truncated for length]"
+        # Limit to a reasonable length (4000 chars) to reduce token count
+        if len(section_text) > 4000:
+            section_text = section_text[:4000] + "...[truncated for length]"
         return section_text, True
     
     # If Item 5.02 section not found, use keyword search as fallback
@@ -259,9 +262,9 @@ def find_management_change_paragraphs(text):
     
     formatted_paragraphs = "\n\n".join(management_change_paragraphs)
     
-    # Limit to a reasonable length (8000 chars) to avoid token limits
-    if len(formatted_paragraphs) > 8000:
-        formatted_paragraphs = formatted_paragraphs[:8000] + "...[truncated for length]"
+    # Limit to a reasonable length (4000 chars) to reduce token count
+    if len(formatted_paragraphs) > 4000:
+        formatted_paragraphs = formatted_paragraphs[:4000] + "...[truncated for length]"
     
     if management_change_paragraphs:
         formatted_paragraphs = (
@@ -277,22 +280,22 @@ def extract_management_changes(text, ticker, client, fiscal_quarter, model="gpt-
     prompt = f"""Extract ALL management change information in this 8-K filing for {ticker} (Quarter: {fiscal_quarter}).
 Focus only on executive management transitions, new appointments, resignations, retirements, and board changes.
 
-For each change, identify:
+For each change, extract ONLY:
 - Type (Appointment, Resignation, Retirement, Promotion, Other)
 - Name of Executive
 - New Role (if applicable)
 - Previous Role (if applicable) 
-- Effective Date (in MM/DD/YYYY format when available)
-- Key Details (background, reason for change)
+- Effective Date
+- Key Details (very brief, 10 words max)
 
-FORMAT: Return each management change as a JSON object with the fields above. Use this exact format:
+FORMAT: Return each management change as a JSON object. Use this exact format:
 {{
   "type": "Appointment/Resignation/etc",
   "name": "Executive Name",
   "new_role": "New Position",
   "previous_role": "Previous Position",
-  "effective_date": "MM/DD/YYYY",
-  "details": "Brief background/reason"
+  "effective_date": "Date",
+  "details": "Brief reason"
 }}
 
 If multiple changes, separate each JSON object with triple hyphens (---).
@@ -302,7 +305,7 @@ TEXT:
 {text}"""
 
     # Add retry logic for API rate limits
-    max_retries = 3
+    max_retries = 2
     retry_delay = 5  # seconds
     
     for attempt in range(max_retries):
@@ -311,7 +314,7 @@ TEXT:
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,
-                max_tokens=1500,  # Limit response size
+                max_tokens=800,  # Limit response size
             )
             return response.choices[0].message.content
         except Exception as e:
@@ -326,15 +329,15 @@ TEXT:
                 # For non-rate limit errors, try with a smaller text chunk
                 if attempt < max_retries - 1:
                     st.info("Trying with a smaller text chunk...")
-                    # Reduce text size by half for next attempt
-                    truncated_text = text[:len(text)//2] + "...[truncated]"
+                    # Reduce text size by 2/3 for next attempt
+                    truncated_text = text[:len(text)//3*2] + "...[truncated]"
                     
                     try:
                         response = client.chat.completions.create(
                             model=model,
                             messages=[{"role": "user", "content": prompt.replace(text, truncated_text)}],
                             temperature=0.3,
-                            max_tokens=1500,
+                            max_tokens=800,
                         )
                         return response.choices[0].message.content
                     except Exception as inner_e:
@@ -486,6 +489,16 @@ if st.button("🔍 Extract Management Changes"):
         else:
             client = OpenAI(api_key=api_key)
             
+            # Use a more efficient model by default for cost savings
+            if use_cheaper_extraction and model_choice == "gpt-4-turbo":
+                actual_model = "gpt-3.5-turbo"
+                st.info(f"Using {actual_model} for cost savings instead of {model_choice}")
+            elif use_cheaper_extraction and model_choice == "gpt-4":
+                actual_model = "gpt-4-turbo"
+                st.info(f"Using {actual_model} for cost savings instead of {model_choice}")
+            else:
+                actual_model = model_choice
+            
             # Get fiscal year end to determine quarters
             fiscal_year_end_month, _ = get_fiscal_year_end(cik, display_message=True)
             
@@ -533,6 +546,10 @@ if st.button("🔍 Extract Management Changes"):
                             if found_management:
                                 st.success("✅ Found potential management change information")
                                 
+                                # Display the text being sent to the LLM for debugging
+                                with st.expander("Debug: Show text being sent to LLM", expanded=False):
+                                    st.text_area("Text sent to LLM", management_paragraphs, height=300)
+                                
                                 # Extract management changes from the highlighted text
                                 with st.spinner("Extracting management changes using AI..."):
                                     management_changes = extract_management_changes(
@@ -540,7 +557,7 @@ if st.button("🔍 Extract Management Changes"):
                                         ticker, 
                                         client, 
                                         fiscal_quarter,
-                                        model=model_choice
+                                        model=actual_model
                                     )
                                 
                                 if management_changes and "No management changes" not in management_changes:

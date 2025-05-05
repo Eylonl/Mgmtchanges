@@ -486,9 +486,6 @@ if st.button("🔍 Extract Management Changes"):
         else:
             client = OpenAI(api_key=api_key)
             
-            # Use the selected model directly
-            actual_model = model_choice
-            
             # Get fiscal year end to determine quarters
             fiscal_year_end_month, _ = get_fiscal_year_end(cik, display_message=True)
             

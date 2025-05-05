@@ -533,10 +533,6 @@ if st.button("🔍 Extract Management Changes"):
                             if found_management:
                                 st.success("✅ Found potential management change information")
                                 
-                                # Display the text being sent to the LLM for debugging
-                                with st.expander("Debug: Show text being sent to LLM", expanded=False):
-                                    st.text_area("Text sent to LLM", management_paragraphs, height=300)
-                                
                                 # Extract management changes from the highlighted text
                                 with st.spinner("Extracting management changes using AI..."):
                                     management_changes = extract_management_changes(

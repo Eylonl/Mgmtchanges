@@ -28,7 +28,8 @@ def lookup_cik(ticker):
             return str(entry["cik_str"]).zfill(10)
     return None
 
-def get_fiscal_year_end(cik):
+@st.cache_data(show_spinner=False)
+def get_fiscal_year_end(cik, display_message=True):
     try:
         headers = {'User-Agent': 'Financial Research contact@example.com'}
         url = f"https://data.sec.gov/submissions/CIK{cik}.json"
@@ -41,13 +42,16 @@ def get_fiscal_year_end(cik):
                 month = int(fiscal_year_end[:2])
                 day = int(fiscal_year_end[2:])
                 month_name = datetime(2000, month, 1).strftime('%B')
-                st.success(f"✅ Fiscal year end: {month_name} {day}")
+                if display_message:
+                    st.success(f"✅ Fiscal year end: {month_name} {day}")
                 return month, day
         
-        st.warning("⚠️ Using default fiscal year end: December 31")
+        if display_message:
+            st.warning("⚠️ Using default fiscal year end: December 31")
         return 12, 31
     except Exception as e:
-        st.warning(f"⚠️ Error: {str(e)}. Using December 31.")
+        if display_message:
+            st.warning(f"⚠️ Error: {str(e)}. Using December 31.")
         return 12, 31
 
 def generate_fiscal_quarters(fiscal_year_end_month):
@@ -121,7 +125,7 @@ def get_accessions(cik, years_back=None, specific_quarter=None):
     filings = data["filings"]["recent"]
     accessions = []
     
-    fiscal_year_end_month, fiscal_year_end_day = get_fiscal_year_end(cik)
+    fiscal_year_end_month, fiscal_year_end_day = get_fiscal_year_end(cik, display_message=False)
     
     if years_back:
         cutoff = datetime.today() - timedelta(days=(365 * years_back))
@@ -281,7 +285,17 @@ For each change, identify:
 - Effective Date (in MM/DD/YYYY format when available)
 - Key Details (background, reason for change)
 
-FORMAT: Respond ONLY with bullet points, each containing the information above.
+FORMAT: Return each management change as a JSON object with the fields above. Use this exact format:
+{{
+  "type": "Appointment/Resignation/etc",
+  "name": "Executive Name",
+  "new_role": "New Position",
+  "previous_role": "Previous Position",
+  "effective_date": "MM/DD/YYYY",
+  "details": "Brief background/reason"
+}}
+
+If multiple changes, separate each JSON object with triple hyphens (---).
 If no management changes are found, respond with "No management changes found."
 
 TEXT:
@@ -339,51 +353,100 @@ def parse_management_changes_to_df(text, fiscal_quarter):
     
     data = []
     
-    # Split into bullet points
-    bullet_points = re.split(r'\n\s*-\s*|\n\s*•\s*', text)
-    bullet_points = [bp.strip() for bp in bullet_points if bp.strip()]
-    
-    # Default pattern for bullet point parsing
-    patterns = {
-        "Type": r'(?i)Type:?\s*([A-Za-z\s]+)',
-        "Name of Executive": r'(?i)Name:?\s*([A-Za-z\s\.]+)',
-        "New Role": r'(?i)New Role:?\s*([^,\n]+)',
-        "Previous Role": r'(?i)Previous Role:?\s*([^,\n]+)',
-        "Effective Date": r'(?i)(?:Effective|Date):?\s*([^,\n]+)',
-        "Other Key Details": r'(?i)(?:Other Key Details|Details|Key Details):?\s*(.+)'
-    }
-    
-    for bullet in bullet_points:
-        item = {"Fiscal Quarter": fiscal_quarter}
+    # Check if we have JSON formatted responses
+    if text.strip().startswith("{"):
+        # Split by the separator if multiple entries
+        json_objects = text.split("---")
         
-        # Check for structured format first
-        for key, pattern in patterns.items():
-            match = re.search(pattern, bullet)
-            if match:
-                item[key] = match.group(1).strip()
-        
-        # If no structured data was found, try to extract as best as possible
-        if len(item) <= 1:  # Only has Fiscal Quarter
-            item["Raw Info"] = bullet
-            
-            # Try to identify type
-            if re.search(r'(?i)appoint|promot|nam[ed]|hir[ed]|join', bullet):
-                item["Type"] = "Appointment"
-            elif re.search(r'(?i)resign|step down|depart', bullet):
-                item["Type"] = "Resignation"
-            elif re.search(r'(?i)retir', bullet):
-                item["Type"] = "Retirement"
-            else:
-                item["Type"] = "Other Change"
+        import json
+        for json_str in json_objects:
+            try:
+                # Clean up the JSON string
+                json_str = json_str.strip()
+                if not json_str:
+                    continue
+                    
+                # Parse the JSON
+                item = json.loads(json_str)
                 
-            # Try to extract name
-            name_match = re.search(r'(?:[A-Z][a-z]+ ){1,3}[A-Z][a-z]+', bullet)
-            if name_match:
-                item["Name of Executive"] = name_match.group(0)
+                # Standardize keys
+                standardized_item = {
+                    "Fiscal Quarter": fiscal_quarter,
+                    "Type": item.get("type", "Not Specified"),
+                    "Name of Executive": item.get("name", "Not Specified"),
+                    "New Role": item.get("new_role", "Not Specified"),
+                    "Previous Role": item.get("previous_role", "Not Specified"),
+                    "Effective Date": item.get("effective_date", "Not Specified"),
+                    "Other Key Details": item.get("details", "Not Specified")
+                }
+                
+                data.append(standardized_item)
+            except json.JSONDecodeError:
+                # If JSON parsing fails, fall back to regex parsing for this entry
+                item = {"Fiscal Quarter": fiscal_quarter, "Raw Info": json_str}
+                
+                # Try to identify type
+                if re.search(r'(?i)appoint|promot|nam[ed]|hir[ed]|join', json_str):
+                    item["Type"] = "Appointment"
+                elif re.search(r'(?i)resign|step down|depart', json_str):
+                    item["Type"] = "Resignation"
+                elif re.search(r'(?i)retir', json_str):
+                    item["Type"] = "Retirement"
+                else:
+                    item["Type"] = "Other Change"
+                    
+                # Try to extract name
+                name_match = re.search(r'(?:[A-Z][a-z]+ ){1,3}[A-Z][a-z]+', json_str)
+                if name_match:
+                    item["Name of Executive"] = name_match.group(0)
+                    
+                if len(item) > 2:  # More than just Fiscal Quarter and Raw Info
+                    data.append(item)
+    else:
+        # Fall back to bullet point parsing for backward compatibility
+        bullet_points = re.split(r'\n\s*-\s*|\n\s*•\s*', text)
+        bullet_points = [bp.strip() for bp in bullet_points if bp.strip()]
         
-        # Only add if we have at least some useful information
-        if len(item) > 2:  # More than just Fiscal Quarter and Raw Info/Type
-            data.append(item)
+        patterns = {
+            "Type": r'(?i)Type:?\s*([A-Za-z\s]+)',
+            "Name of Executive": r'(?i)Name:?\s*([A-Za-z\s\.]+)',
+            "New Role": r'(?i)New Role:?\s*([^,\n]+)',
+            "Previous Role": r'(?i)Previous Role:?\s*([^,\n]+)',
+            "Effective Date": r'(?i)(?:Effective|Date):?\s*([^,\n]+)',
+            "Other Key Details": r'(?i)(?:Other Key Details|Details|Key Details):?\s*(.+)'
+        }
+        
+        for bullet in bullet_points:
+            item = {"Fiscal Quarter": fiscal_quarter}
+            
+            # Check for structured format first
+            for key, pattern in patterns.items():
+                match = re.search(pattern, bullet)
+                if match:
+                    item[key] = match.group(1).strip()
+            
+            # If no structured data was found, try to extract as best as possible
+            if len(item) <= 1:  # Only has Fiscal Quarter
+                item["Raw Info"] = bullet
+                
+                # Try to identify type
+                if re.search(r'(?i)appoint|promot|nam[ed]|hir[ed]|join', bullet):
+                    item["Type"] = "Appointment"
+                elif re.search(r'(?i)resign|step down|depart', bullet):
+                    item["Type"] = "Resignation"
+                elif re.search(r'(?i)retir', bullet):
+                    item["Type"] = "Retirement"
+                else:
+                    item["Type"] = "Other Change"
+                    
+                # Try to extract name
+                name_match = re.search(r'(?:[A-Z][a-z]+ ){1,3}[A-Z][a-z]+', bullet)
+                if name_match:
+                    item["Name of Executive"] = name_match.group(0)
+            
+            # Only add if we have at least some useful information
+            if len(item) > 2:  # More than just Fiscal Quarter and Raw Info
+                data.append(item)
     
     # Create DataFrame
     if data:
@@ -435,7 +498,7 @@ if st.button("🔍 Extract Management Changes"):
             client = OpenAI(api_key=api_key)
             
             # Get fiscal year end to determine quarters
-            fiscal_year_end_month, _ = get_fiscal_year_end(cik)
+            fiscal_year_end_month, _ = get_fiscal_year_end(cik, display_message=True)
             
             # Handle different filtering options
             if quarter_input.strip():
@@ -455,86 +518,211 @@ if st.button("🔍 Extract Management Changes"):
             links = get_8k_links(cik, accessions)
             results = []
 
+            # Create progress bar
+            progress_bar = st.progress(0)
+            
             with st.spinner("Processing 8-K filings..."):
-                for date_str, acc, url in links:
-                    st.write(f"📄 Processing 8-K from {date_str}")
-                    try:
-                        # Determine the fiscal quarter for this filing
-                        fiscal_quarter = determine_fiscal_quarter(date_str, fiscal_year_end_month)
-                        st.write(f"Filing is in: {fiscal_quarter}")
-                        
-                        # Get the text content of the filing
-                        response = requests.get(url, headers={"User-Agent": "Financial Research contact@example.com"})
-                        text = response.text
-                        
-                        # Find paragraphs containing management change patterns
-                        management_paragraphs, found_management = find_management_change_paragraphs(text)
-                        
-                        if found_management:
-                            st.success(f"✅ Found potential management change information.")
+                # Process each filing
+                for i, (date_str, acc, url) in enumerate(links):
+                    # Update progress
+                    progress_bar.progress((i / len(links)))
+                    
+                    # Create expander for this filing
+                    with st.expander(f"📄 8-K Filing from {date_str}", expanded=False):
+                        try:
+                            # Determine the fiscal quarter for this filing
+                            fiscal_quarter = determine_fiscal_quarter(date_str, fiscal_year_end_month)
+                            st.write(f"📅 Filing is in: **{fiscal_quarter}**")
                             
-                            # Extract management changes from the highlighted text
-                            management_changes = extract_management_changes(
-                                management_paragraphs, 
-                                ticker, 
-                                client, 
-                                fiscal_quarter,
-                                model=model_choice
-                            )
+                            # Get the text content of the filing
+                            response = requests.get(url, headers={"User-Agent": "Financial Research contact@example.com"})
+                            text = response.text
                             
-                            if management_changes and "No management changes" not in management_changes:
-                                # Display the extracted information
-                                st.markdown("### Extracted Management Changes")
-                                st.markdown(management_changes)
+                            # Find paragraphs containing management change patterns
+                            management_paragraphs, found_management = find_management_change_paragraphs(text)
+                            
+                            if found_management:
+                                st.success("✅ Found potential management change information")
                                 
-                                # Parse to DataFrame
-                                df = parse_management_changes_to_df(management_changes, fiscal_quarter)
+                                # Extract management changes from the highlighted text
+                                with st.spinner("Extracting management changes using AI..."):
+                                    management_changes = extract_management_changes(
+                                        management_paragraphs, 
+                                        ticker, 
+                                        client, 
+                                        fiscal_quarter,
+                                        model=model_choice
+                                    )
                                 
-                                if df is not None:
-                                    # Add metadata
-                                    df["Filing Date"] = date_str
-                                    df["8K Link"] = url
-                                    results.append(df)
-                                    st.success("✅ Management changes extracted from this 8-K.")
+                                if management_changes and "No management changes" not in management_changes:
+                                    # Format the display for JSON output
+                                    if management_changes.strip().startswith("{"):
+                                        import json
+                                        json_objects = management_changes.split("---")
+                                        
+                                        for idx, json_str in enumerate(json_objects):
+                                            try:
+                                                json_str = json_str.strip()
+                                                if not json_str:
+                                                    continue
+                                                    
+                                                change_data = json.loads(json_str)
+                                                
+                                                # Display in a clean card format
+                                                st.markdown(f"""
+                                                <div style="border:1px solid #d0d7de; border-radius:6px; padding:16px; margin-bottom:16px;">
+                                                    <h4 style="margin-top:0; color:#0969da;">
+                                                        {change_data.get('type', 'Management Change')} - {change_data.get('name', 'Executive')}
+                                                    </h4>
+                                                    <table style="width:100%;">
+                                                        <tr>
+                                                            <td style="width:25%; color:#57606a;"><strong>New Role:</strong></td>
+                                                            <td>{change_data.get('new_role', 'Not Specified')}</td>
+                                                        </tr>
+                                                        <tr>
+                                                            <td style="width:25%; color:#57606a;"><strong>Previous Role:</strong></td>
+                                                            <td>{change_data.get('previous_role', 'Not Specified')}</td>
+                                                        </tr>
+                                                        <tr>
+                                                            <td style="width:25%; color:#57606a;"><strong>Effective Date:</strong></td>
+                                                            <td>{change_data.get('effective_date', 'Not Specified')}</td>
+                                                        </tr>
+                                                        <tr>
+                                                            <td style="width:25%; color:#57606a;"><strong>Details:</strong></td>
+                                                            <td>{change_data.get('details', 'Not Specified')}</td>
+                                                        </tr>
+                                                    </table>
+                                                </div>
+                                                """, unsafe_allow_html=True)
+                                            except json.JSONDecodeError:
+                                                st.markdown(f"**Raw Change Data {idx+1}:**\n{json_str}")
+                                    else:
+                                        # Fall back to displaying as markdown for non-JSON format
+                                        st.markdown("### Extracted Management Changes")
+                                        st.markdown(management_changes)
+                                    
+                                    # Parse to DataFrame
+                                    df = parse_management_changes_to_df(management_changes, fiscal_quarter)
+                                    
+                                    if df is not None:
+                                        # Add metadata
+                                        df["Filing Date"] = date_str
+                                        df["8K Link"] = url
+                                        results.append(df)
+                                        st.success("✅ Management changes extracted from this 8-K")
+                                    else:
+                                        st.warning("⚠️ No structured management change data found")
                                 else:
-                                    st.warning(f"⚠️ No structured management change data found")
+                                    st.info("ℹ️ No management changes found in this filing")
                             else:
-                                st.info(f"ℹ️ No management changes found in this filing.")
-                        else:
-                            st.info(f"ℹ️ No management change information detected in this filing.")
-                            
-                    except Exception as e:
-                        st.warning(f"Could not process: {url}. Error: {str(e)}")
+                                st.info("ℹ️ No management change information detected in this filing")
+                                
+                        except Exception as e:
+                            st.error(f"❌ Could not process: {url}. Error: {str(e)}")
+                
+                # Set progress to 100% when done
+                progress_bar.progress(1.0)
 
             if results:
+                # Combine all results
                 combined = pd.concat(results, ignore_index=True)
                 
-                # Preview the table
-                st.subheader("🔍 Preview of Extracted Management Changes")
-                st.dataframe(combined, use_container_width=True)
+                # Show summary statistics
+                st.subheader("📊 Management Changes Summary")
                 
-                # Add download button
-                try:
-                    import io
-                    excel_buffer = io.BytesIO()
-                    with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-                        combined.to_excel(writer, index=False)
-                    st.download_button(
-                        "📥 Download Excel", 
-                        data=excel_buffer.getvalue(), 
-                        file_name=f"{ticker}_management_changes.xlsx", 
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Total Changes", len(combined))
+                with col2:
+                    # Count by type
+                    type_counts = combined["Type"].value_counts()
+                    most_common_type = type_counts.index[0] if not type_counts.empty else "None"
+                    st.metric("Most Common Type", f"{most_common_type} ({type_counts.iloc[0]})" if not type_counts.empty else "None")
+                with col3:
+                    # Count by quarter
+                    quarter_counts = combined["Fiscal Quarter"].value_counts()
+                    most_active_quarter = quarter_counts.index[0] if not quarter_counts.empty else "None"
+                    st.metric("Most Active Quarter", f"{most_active_quarter} ({quarter_counts.iloc[0]})" if not quarter_counts.empty else "None")
+                
+                # Preview the table with filters
+                st.subheader("🔍 Management Changes Table")
+                
+                # Add filtering options
+                filter_col1, filter_col2 = st.columns(2)
+                with filter_col1:
+                    filter_type = st.multiselect(
+                        "Filter by Type",
+                        options=["All"] + sorted(combined["Type"].unique().tolist()),
+                        default=["All"]
                     )
-                except Exception as e:
-                    st.error(f"❌ Excel export error: {str(e)}")
-                    # Fallback to CSV
-                    csv_buffer = io.StringIO()
-                    combined.to_csv(csv_buffer, index=False)
-                    st.download_button(
-                        "📥 Download CSV (Excel export failed)", 
-                        data=csv_buffer.getvalue(), 
-                        file_name=f"{ticker}_management_changes.csv", 
-                        mime="text/csv"
+                with filter_col2:
+                    filter_quarter = st.multiselect(
+                        "Filter by Quarter",
+                        options=["All"] + sorted(combined["Fiscal Quarter"].unique().tolist()),
+                        default=["All"]
                     )
+                
+                # Apply filters
+                filtered_df = combined.copy()
+                if filter_type and "All" not in filter_type:
+                    filtered_df = filtered_df[filtered_df["Type"].isin(filter_type)]
+                if filter_quarter and "All" not in filter_quarter:
+                    filtered_df = filtered_df[filtered_df["Fiscal Quarter"].isin(filter_quarter)]
+                
+                # Display the filtered table
+                st.dataframe(filtered_df, use_container_width=True)
+                
+                # Add download buttons
+                st.subheader("📥 Download Results")
+                
+                download_col1, download_col2 = st.columns(2)
+                
+                with download_col1:
+                    try:
+                        import io
+                        excel_buffer = io.BytesIO()
+                        with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                            combined.to_excel(writer, index=False)
+                        st.download_button(
+                            "📥 Download All Data (Excel)", 
+                            data=excel_buffer.getvalue(), 
+                            file_name=f"{ticker}_management_changes.xlsx", 
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+                    except Exception as e:
+                        st.error(f"❌ Excel export error: {str(e)}")
+                        # Fallback to CSV
+                        csv_buffer = io.StringIO()
+                        combined.to_csv(csv_buffer, index=False)
+                        st.download_button(
+                            "📥 Download All Data (CSV)", 
+                            data=csv_buffer.getvalue(), 
+                            file_name=f"{ticker}_management_changes.csv", 
+                            mime="text/csv"
+                        )
+                
+                with download_col2:
+                    # Download filtered data
+                    if not filtered_df.equals(combined):
+                        try:
+                            excel_buffer_filtered = io.BytesIO()
+                            with pd.ExcelWriter(excel_buffer_filtered, engine='openpyxl') as writer:
+                                filtered_df.to_excel(writer, index=False)
+                            st.download_button(
+                                "📥 Download Filtered Data (Excel)", 
+                                data=excel_buffer_filtered.getvalue(), 
+                                file_name=f"{ticker}_filtered_management_changes.xlsx", 
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            )
+                        except Exception as e:
+                            # Fallback to CSV
+                            csv_buffer_filtered = io.StringIO()
+                            filtered_df.to_csv(csv_buffer_filtered, index=False)
+                            st.download_button(
+                                "📥 Download Filtered Data (CSV)", 
+                                data=csv_buffer_filtered.getvalue(), 
+                                file_name=f"{ticker}_filtered_management_changes.csv", 
+                                mime="text/csv"
+                            )
             else:
                 st.warning("No management change data extracted from any of the filings.")

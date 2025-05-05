@@ -5,6 +5,8 @@ from datetime import datetime, timedelta
 import re
 import pandas as pd
 from openai import OpenAI
+import time
+import textwrap
 
 st.set_page_config(page_title="SEC 8-K Management Changes Extractor", layout="centered")
 st.title("📄 SEC 8-K Management Changes Extractor")
@@ -14,6 +16,7 @@ ticker = st.text_input("Enter Stock Ticker (e.g., MSFT, ORCL)", "MSFT").upper()
 api_key = st.text_input("Enter OpenAI API Key", type="password")
 year_input = st.text_input("How many years back to search? (Leave blank for most recent only)", "")
 quarter_input = st.text_input("OR enter specific quarter (e.g., 2Q25, Q4FY24)", "")
+model_choice = st.selectbox("Select OpenAI Model", ["gpt-3.5-turbo", "gpt-4-turbo", "gpt-4"], index=0)
 
 @st.cache_data(show_spinner=False)
 def lookup_cik(ticker):
@@ -211,6 +214,18 @@ def determine_fiscal_quarter(date_str, fiscal_year_end_month):
     return f"Q{quarter_num} FY{fiscal_year_short}"
 
 def find_management_change_paragraphs(text):
+    # First, try to extract Item 5.02 section which is specifically for management changes
+    item_502_pattern = re.compile(r'(?i)Item\s+5\.02.+?(?=Item\s+\d\.\d{2}|$)', re.DOTALL)
+    match = item_502_pattern.search(text)
+    
+    if match:
+        section_text = match.group(0)
+        # Limit to a reasonable length (8000 chars) to avoid token limits
+        if len(section_text) > 8000:
+            section_text = section_text[:8000] + "...[truncated for length]"
+        return section_text, True
+    
+    # If Item 5.02 section not found, use keyword search as fallback
     management_change_patterns = [
         r'(?i)appoint(?:ed|ment|ing|s)?',
         r'(?i)nam(?:ed|ing|es) .* (?:as|to)',
@@ -226,8 +241,7 @@ def find_management_change_paragraphs(text):
         r'(?i)(?:join|joined) (?:the|as)',
         r'(?i)(?:board|executive|management) (?:appointment|change)',
         r'(?i)(?:hire|hired|hiring) (?:as|to)',
-        r'(?i)(?:elect|elected|electing) (?:as|to)',
-        r'(?i)Item 5.02'  # SEC 8-K item number for management changes
+        r'(?i)(?:elect|elected|electing) (?:as|to)'
     ]
     
     paragraphs = re.split(r'\n\s*\n|\.\s+(?=[A-Z])', text)
@@ -239,16 +253,11 @@ def find_management_change_paragraphs(text):
     
     found_paragraphs = len(management_change_paragraphs) > 0
     
-    if not found_paragraphs:
-        item_502_pattern = re.compile(r'(?i)Item\s+5\.02.+?(?=Item\s+\d\.\d{2}|$)', re.DOTALL)
-        match = item_502_pattern.search(text)
-        if match:
-            section_text = match.group(0)
-            item_502_paragraphs = re.split(r'\n\s*\n|\.\s+(?=[A-Z])', section_text)
-            management_change_paragraphs.extend(item_502_paragraphs)
-            found_paragraphs = True
-    
     formatted_paragraphs = "\n\n".join(management_change_paragraphs)
+    
+    # Limit to a reasonable length (8000 chars) to avoid token limits
+    if len(formatted_paragraphs) > 8000:
+        formatted_paragraphs = formatted_paragraphs[:8000] + "...[truncated for length]"
     
     if management_change_paragraphs:
         formatted_paragraphs = (
@@ -259,45 +268,73 @@ def find_management_change_paragraphs(text):
     
     return formatted_paragraphs, found_paragraphs
 
-def extract_management_changes(text, ticker, client, fiscal_quarter):
-    prompt = f"""You are a financial analyst. Extract ALL management change information in this 8-K filing for {ticker}. Focus on executive management transitions, new appointments, resignations, retirements, and board changes.
+def extract_management_changes(text, ticker, client, fiscal_quarter, model="gpt-3.5-turbo"):
+    # Create a shorter prompt to reduce token count
+    prompt = f"""Extract ALL management change information in this 8-K filing for {ticker} (Quarter: {fiscal_quarter}).
+Focus only on executive management transitions, new appointments, resignations, retirements, and board changes.
 
-For the quarter: {fiscal_quarter}
-
-Return the information as bullet points with these categories:
-- Type (Appointment, Resignation, Retirement, Promotion, Other Change)
+For each change, identify:
+- Type (Appointment, Resignation, Retirement, Promotion, Other)
 - Name of Executive
 - New Role (if applicable)
-- Previous Role (if applicable)
-- Effective Date
-- Other Key Details (e.g., reason for change, background of new appointee)
+- Previous Role (if applicable) 
+- Effective Date (in MM/DD/YYYY format when available)
+- Key Details (background, reason for change)
 
-INSTRUCTIONS:
-- List each management change on a separate bullet point
-- Include ALL management changes mentioned in the document
-- Focus on C-suite executives, Presidents, Board Members, and other high-level executives
-- Include both incoming and outgoing executives
-- If exact dates are given, include them in MM/DD/YYYY format
-- If only a month and year is mentioned, format as MM/YYYY
-- If no date is specified, note as "Effective Immediately" or "Not Specified"
-- For "Other Key Details", include notable background information, succession details, or reasons for the change
-- If certain information is not available, use "N/A" or "Not Specified"
+FORMAT: Respond ONLY with bullet points, each containing the information above.
+If no management changes are found, respond with "No management changes found."
 
-Respond in bullet point format with clear headings for each type of information.\n\n{text}"""
+TEXT:
+{text}"""
+
+    # Add retry logic for API rate limits
+    max_retries = 3
+    retry_delay = 5  # seconds
     
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        st.warning(f"⚠️ Error extracting management changes: {str(e)}")
-        return None
+    for attempt in range(max_retries):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=1500,  # Limit response size
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            error_msg = str(e)
+            st.warning(f"⚠️ Attempt {attempt+1}/{max_retries}: {error_msg}")
+            
+            if "rate_limit_exceeded" in error_msg:
+                st.info(f"Waiting {retry_delay} seconds before retrying...")
+                time.sleep(retry_delay)
+                retry_delay *= 2  # Exponential backoff
+            else:
+                # For non-rate limit errors, try with a smaller text chunk
+                if attempt < max_retries - 1:
+                    st.info("Trying with a smaller text chunk...")
+                    # Reduce text size by half for next attempt
+                    truncated_text = text[:len(text)//2] + "...[truncated]"
+                    
+                    try:
+                        response = client.chat.completions.create(
+                            model=model,
+                            messages=[{"role": "user", "content": prompt.replace(text, truncated_text)}],
+                            temperature=0.3,
+                            max_tokens=1500,
+                        )
+                        return response.choices[0].message.content
+                    except Exception as inner_e:
+                        st.warning(f"⚠️ Failed with smaller text chunk: {str(inner_e)}")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2
+                else:
+                    break
+    
+    st.error("Failed to extract management changes after multiple attempts")
+    return "No management changes could be extracted due to API limitations. Try again later or with a different model."
 
 def parse_management_changes_to_df(text, fiscal_quarter):
-    if not text or "No management changes found" in text:
+    if not text or "No management changes" in text:
         return None
     
     data = []
@@ -306,43 +343,35 @@ def parse_management_changes_to_df(text, fiscal_quarter):
     bullet_points = re.split(r'\n\s*-\s*|\n\s*•\s*', text)
     bullet_points = [bp.strip() for bp in bullet_points if bp.strip()]
     
-    current_item = {}
+    # Default pattern for bullet point parsing
+    patterns = {
+        "Type": r'(?i)Type:?\s*([A-Za-z\s]+)',
+        "Name of Executive": r'(?i)Name:?\s*([A-Za-z\s\.]+)',
+        "New Role": r'(?i)New Role:?\s*([^,\n]+)',
+        "Previous Role": r'(?i)Previous Role:?\s*([^,\n]+)',
+        "Effective Date": r'(?i)(?:Effective|Date):?\s*([^,\n]+)',
+        "Other Key Details": r'(?i)(?:Other Key Details|Details|Key Details):?\s*(.+)'
+    }
     
     for bullet in bullet_points:
-        # Check if this is the start of a new item
-        if bullet.startswith("Type:") or "Type:" in bullet[:20]:
-            # Save previous item if it exists
-            if current_item and "Type" in current_item:
-                current_item["Fiscal Quarter"] = fiscal_quarter
-                data.append(current_item)
-                current_item = {}
+        item = {"Fiscal Quarter": fiscal_quarter}
+        
+        # Check for structured format first
+        for key, pattern in patterns.items():
+            match = re.search(pattern, bullet)
+            if match:
+                item[key] = match.group(1).strip()
+        
+        # If no structured data was found, try to extract as best as possible
+        if len(item) <= 1:  # Only has Fiscal Quarter
+            item["Raw Info"] = bullet
             
-            # Parse the bullet point into fields
-            fields = re.split(r'\n', bullet)
-            for field in fields:
-                if ":" in field:
-                    key, value = field.split(":", 1)
-                    current_item[key.strip()] = value.strip()
-    
-    # Add the last item
-    if current_item and "Type" in current_item:
-        current_item["Fiscal Quarter"] = fiscal_quarter
-        data.append(current_item)
-    
-    # If no structured data was found but we have bullet points, try a simpler parsing
-    if not data and bullet_points:
-        for bullet in bullet_points:
-            item = {
-                "Raw Info": bullet,
-                "Fiscal Quarter": fiscal_quarter
-            }
-            
-            # Try to extract some structure
-            if re.search(r'appoint|promot|nam[ed]|hir[ed]|join', bullet, re.I):
+            # Try to identify type
+            if re.search(r'(?i)appoint|promot|nam[ed]|hir[ed]|join', bullet):
                 item["Type"] = "Appointment"
-            elif re.search(r'resign|step down|depart', bullet, re.I):
+            elif re.search(r'(?i)resign|step down|depart', bullet):
                 item["Type"] = "Resignation"
-            elif re.search(r'retir', bullet, re.I):
+            elif re.search(r'(?i)retir', bullet):
                 item["Type"] = "Retirement"
             else:
                 item["Type"] = "Other Change"
@@ -351,7 +380,9 @@ def parse_management_changes_to_df(text, fiscal_quarter):
             name_match = re.search(r'(?:[A-Z][a-z]+ ){1,3}[A-Z][a-z]+', bullet)
             if name_match:
                 item["Name of Executive"] = name_match.group(0)
-                
+        
+        # Only add if we have at least some useful information
+        if len(item) > 2:  # More than just Fiscal Quarter and Raw Info/Type
             data.append(item)
     
     # Create DataFrame
@@ -375,7 +406,25 @@ def parse_management_changes_to_df(text, fiscal_quarter):
     else:
         return None
 
+def install_required_packages():
+    """Make sure openpyxl is installed for Excel support"""
+    try:
+        import openpyxl
+        st.success("✅ All dependencies installed")
+    except ImportError:
+        st.warning("⚠️ Installing missing dependencies...")
+        try:
+            import subprocess
+            subprocess.check_call(["pip", "install", "openpyxl"])
+            st.success("✅ Dependencies installed successfully")
+        except Exception as e:
+            st.error(f"❌ Failed to install dependencies: {str(e)}")
+            st.info("If you're seeing Excel-related errors, please ensure the openpyxl package is installed")
+
 if st.button("🔍 Extract Management Changes"):
+    # Make sure dependencies are installed
+    install_required_packages()
+    
     if not api_key:
         st.error("Please enter your OpenAI API key.")
     else:
@@ -406,49 +455,56 @@ if st.button("🔍 Extract Management Changes"):
             links = get_8k_links(cik, accessions)
             results = []
 
-            for date_str, acc, url in links:
-                st.write(f"📄 Processing 8-K from {date_str}")
-                try:
-                    # Determine the fiscal quarter for this filing
-                    fiscal_quarter = determine_fiscal_quarter(date_str, fiscal_year_end_month)
-                    st.write(f"Filing is in: {fiscal_quarter}")
-                    
-                    # Get the text content of the filing
-                    response = requests.get(url, headers={"User-Agent": "Financial Research contact@example.com"})
-                    text = response.text
-                    
-                    # Find paragraphs containing management change patterns
-                    management_paragraphs, found_management = find_management_change_paragraphs(text)
-                    
-                    if found_management:
-                        st.success(f"✅ Found potential management change information.")
+            with st.spinner("Processing 8-K filings..."):
+                for date_str, acc, url in links:
+                    st.write(f"📄 Processing 8-K from {date_str}")
+                    try:
+                        # Determine the fiscal quarter for this filing
+                        fiscal_quarter = determine_fiscal_quarter(date_str, fiscal_year_end_month)
+                        st.write(f"Filing is in: {fiscal_quarter}")
                         
-                        # Extract management changes from the highlighted text
-                        management_changes = extract_management_changes(management_paragraphs, ticker, client, fiscal_quarter)
+                        # Get the text content of the filing
+                        response = requests.get(url, headers={"User-Agent": "Financial Research contact@example.com"})
+                        text = response.text
                         
-                        if management_changes:
-                            # Display the extracted information
-                            st.markdown("### Extracted Management Changes")
-                            st.markdown(management_changes)
+                        # Find paragraphs containing management change patterns
+                        management_paragraphs, found_management = find_management_change_paragraphs(text)
+                        
+                        if found_management:
+                            st.success(f"✅ Found potential management change information.")
                             
-                            # Parse to DataFrame
-                            df = parse_management_changes_to_df(management_changes, fiscal_quarter)
+                            # Extract management changes from the highlighted text
+                            management_changes = extract_management_changes(
+                                management_paragraphs, 
+                                ticker, 
+                                client, 
+                                fiscal_quarter,
+                                model=model_choice
+                            )
                             
-                            if df is not None:
-                                # Add metadata
-                                df["Filing Date"] = date_str
-                                df["8K Link"] = url
-                                results.append(df)
-                                st.success("✅ Management changes extracted from this 8-K.")
+                            if management_changes and "No management changes" not in management_changes:
+                                # Display the extracted information
+                                st.markdown("### Extracted Management Changes")
+                                st.markdown(management_changes)
+                                
+                                # Parse to DataFrame
+                                df = parse_management_changes_to_df(management_changes, fiscal_quarter)
+                                
+                                if df is not None:
+                                    # Add metadata
+                                    df["Filing Date"] = date_str
+                                    df["8K Link"] = url
+                                    results.append(df)
+                                    st.success("✅ Management changes extracted from this 8-K.")
+                                else:
+                                    st.warning(f"⚠️ No structured management change data found")
                             else:
-                                st.warning(f"⚠️ No structured management change data found")
+                                st.info(f"ℹ️ No management changes found in this filing.")
                         else:
-                            st.warning(f"⚠️ No management changes found")
-                    else:
-                        st.info(f"ℹ️ No management change information detected in this filing.")
-                        
-                except Exception as e:
-                    st.warning(f"Could not process: {url}. Error: {str(e)}")
+                            st.info(f"ℹ️ No management change information detected in this filing.")
+                            
+                    except Exception as e:
+                        st.warning(f"Could not process: {url}. Error: {str(e)}")
 
             if results:
                 combined = pd.concat(results, ignore_index=True)
@@ -458,9 +514,27 @@ if st.button("🔍 Extract Management Changes"):
                 st.dataframe(combined, use_container_width=True)
                 
                 # Add download button
-                import io
-                excel_buffer = io.BytesIO()
-                combined.to_excel(excel_buffer, index=False)
-                st.download_button("📥 Download Excel", data=excel_buffer.getvalue(), file_name=f"{ticker}_management_changes.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                try:
+                    import io
+                    excel_buffer = io.BytesIO()
+                    with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                        combined.to_excel(writer, index=False)
+                    st.download_button(
+                        "📥 Download Excel", 
+                        data=excel_buffer.getvalue(), 
+                        file_name=f"{ticker}_management_changes.xlsx", 
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                except Exception as e:
+                    st.error(f"❌ Excel export error: {str(e)}")
+                    # Fallback to CSV
+                    csv_buffer = io.StringIO()
+                    combined.to_csv(csv_buffer, index=False)
+                    st.download_button(
+                        "📥 Download CSV (Excel export failed)", 
+                        data=csv_buffer.getvalue(), 
+                        file_name=f"{ticker}_management_changes.csv", 
+                        mime="text/csv"
+                    )
             else:
                 st.warning("No management change data extracted from any of the filings.")

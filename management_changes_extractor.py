@@ -465,6 +465,10 @@ def parse_management_changes_to_df(text, fiscal_quarter):
         # Reorder columns
         df = df[["Fiscal Quarter"] + [col for col in required_columns if col != "Fiscal Quarter"]]
         
+        # Remove duplicate rows based on all columns except Filing Date and 8K Link
+        # since those are added later
+        df = df.drop_duplicates()
+        
         return df
     else:
         return None
@@ -472,17 +476,17 @@ def parse_management_changes_to_df(text, fiscal_quarter):
 def install_required_packages():
     """Make sure openpyxl is installed for Excel support"""
     try:
-        import openpyxl
-        st.success("✅ All dependencies installed")
-    except ImportError:
-        st.warning("⚠️ Installing missing dependencies...")
-        try:
-            import subprocess
-            subprocess.check_call(["pip", "install", "openpyxl"])
-            st.success("✅ Dependencies installed successfully")
-        except Exception as e:
-            st.error(f"❌ Failed to install dependencies: {str(e)}")
-            st.info("If you're seeing Excel-related errors, please ensure the openpyxl package is installed")
+        import importlib.util
+        if importlib.util.find_spec("openpyxl") is None:
+            st.warning("⚠️ Required package 'openpyxl' is not installed")
+            st.info("To enable Excel export, please install openpyxl using: pip install openpyxl")
+            return False
+        else:
+            return True
+    except Exception as e:
+        st.error(f"❌ Error checking for dependencies: {str(e)}")
+        st.info("If you're seeing Excel-related errors, please ensure the openpyxl package is installed")
+        return False
 
 if st.button("🔍 Extract Management Changes"):
     # Make sure dependencies are installed
@@ -678,51 +682,27 @@ if st.button("🔍 Extract Management Changes"):
                 download_col1, download_col2 = st.columns(2)
                 
                 with download_col1:
-                    try:
-                        import io
-                        excel_buffer = io.BytesIO()
-                        with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-                            combined.to_excel(writer, index=False)
-                        st.download_button(
-                            "📥 Download All Data (Excel)", 
-                            data=excel_buffer.getvalue(), 
-                            file_name=f"{ticker}_management_changes.xlsx", 
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        )
-                    except Exception as e:
-                        st.error(f"❌ Excel export error: {str(e)}")
-                        # Fallback to CSV
-                        csv_buffer = io.StringIO()
-                        combined.to_csv(csv_buffer, index=False)
-                        st.download_button(
-                            "📥 Download All Data (CSV)", 
-                            data=csv_buffer.getvalue(), 
-                            file_name=f"{ticker}_management_changes.csv", 
-                            mime="text/csv"
-                        )
+                    # CSV export for all data
+                    import io
+                    csv_buffer = io.StringIO()
+                    combined.to_csv(csv_buffer, index=False)
+                    st.download_button(
+                        "📥 Download All Data (CSV)", 
+                        data=csv_buffer.getvalue(), 
+                        file_name=f"{ticker}_management_changes.csv", 
+                        mime="text/csv"
+                    )
                 
                 with download_col2:
                     # Download filtered data
                     if not filtered_df.equals(combined):
-                        try:
-                            excel_buffer_filtered = io.BytesIO()
-                            with pd.ExcelWriter(excel_buffer_filtered, engine='openpyxl') as writer:
-                                filtered_df.to_excel(writer, index=False)
-                            st.download_button(
-                                "📥 Download Filtered Data (Excel)", 
-                                data=excel_buffer_filtered.getvalue(), 
-                                file_name=f"{ticker}_filtered_management_changes.xlsx", 
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                            )
-                        except Exception as e:
-                            # Fallback to CSV
-                            csv_buffer_filtered = io.StringIO()
-                            filtered_df.to_csv(csv_buffer_filtered, index=False)
-                            st.download_button(
-                                "📥 Download Filtered Data (CSV)", 
-                                data=csv_buffer_filtered.getvalue(), 
-                                file_name=f"{ticker}_filtered_management_changes.csv", 
-                                mime="text/csv"
-                            )
+                        csv_buffer_filtered = io.StringIO()
+                        filtered_df.to_csv(csv_buffer_filtered, index=False)
+                        st.download_button(
+                            "📥 Download Filtered Data (CSV)", 
+                            data=csv_buffer_filtered.getvalue(), 
+                            file_name=f"{ticker}_filtered_management_changes.csv", 
+                            mime="text/csv"
+                        )
             else:
                 st.warning("No management change data extracted from any of the filings.")

@@ -11,7 +11,7 @@ import textwrap
 st.set_page_config(page_title="Management Changes Summary Extractor", layout="centered")
 st.title("📄 Management Changes Summary Extractor")
 
-# Inputs with GPT-3.5-turbo as the default
+# Inputs
 ticker = st.text_input("Enter Stock Ticker (e.g., MSFT, ORCL)", "MSFT").upper()
 api_key = st.text_input("Enter OpenAI API Key", type="password")
 year_input = st.text_input("How many years back to search? (Leave blank for most recent only)", "")
@@ -224,9 +224,9 @@ def find_management_change_paragraphs(text):
     
     if match:
         section_text = match.group(0)
-        # Limit to a reasonable length (4000 chars) to reduce token count
-        if len(section_text) > 4000:
-            section_text = section_text[:4000] + "...[truncated for length]"
+        # Limit to a reasonable length (8000 chars) to avoid token limits
+        if len(section_text) > 8000:
+            section_text = section_text[:8000] + "...[truncated for length]"
         return section_text, True
     
     # If Item 5.02 section not found, use keyword search as fallback
@@ -259,9 +259,9 @@ def find_management_change_paragraphs(text):
     
     formatted_paragraphs = "\n\n".join(management_change_paragraphs)
     
-    # Limit to a reasonable length (4000 chars) to reduce token count
-    if len(formatted_paragraphs) > 4000:
-        formatted_paragraphs = formatted_paragraphs[:4000] + "...[truncated for length]"
+    # Limit to a reasonable length (8000 chars) to avoid token limits
+    if len(formatted_paragraphs) > 8000:
+        formatted_paragraphs = formatted_paragraphs[:8000] + "...[truncated for length]"
     
     if management_change_paragraphs:
         formatted_paragraphs = (
@@ -277,22 +277,22 @@ def extract_management_changes(text, ticker, client, fiscal_quarter, model="gpt-
     prompt = f"""Extract ALL management change information in this 8-K filing for {ticker} (Quarter: {fiscal_quarter}).
 Focus only on executive management transitions, new appointments, resignations, retirements, and board changes.
 
-For each change, extract ONLY:
+For each change, identify:
 - Type (Appointment, Resignation, Retirement, Promotion, Other)
 - Name of Executive
 - New Role (if applicable)
 - Previous Role (if applicable) 
-- Effective Date
-- Key Details (very brief, 10 words max)
+- Effective Date (in MM/DD/YYYY format when available)
+- Key Details (background, reason for change)
 
-FORMAT: Return each management change as a JSON object. Use this exact format:
+FORMAT: Return each management change as a JSON object with the fields above. Use this exact format:
 {{
   "type": "Appointment/Resignation/etc",
   "name": "Executive Name",
   "new_role": "New Position",
   "previous_role": "Previous Position",
-  "effective_date": "Date",
-  "details": "Brief reason"
+  "effective_date": "MM/DD/YYYY",
+  "details": "Brief background/reason"
 }}
 
 If multiple changes, separate each JSON object with triple hyphens (---).
@@ -302,7 +302,7 @@ TEXT:
 {text}"""
 
     # Add retry logic for API rate limits
-    max_retries = 2
+    max_retries = 3
     retry_delay = 5  # seconds
     
     for attempt in range(max_retries):
@@ -311,7 +311,7 @@ TEXT:
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,
-                max_tokens=800,  # Limit response size
+                max_tokens=1500,  # Limit response size
             )
             return response.choices[0].message.content
         except Exception as e:
@@ -326,15 +326,15 @@ TEXT:
                 # For non-rate limit errors, try with a smaller text chunk
                 if attempt < max_retries - 1:
                     st.info("Trying with a smaller text chunk...")
-                    # Reduce text size by 2/3 for next attempt
-                    truncated_text = text[:len(text)//3*2] + "...[truncated]"
+                    # Reduce text size by half for next attempt
+                    truncated_text = text[:len(text)//2] + "...[truncated]"
                     
                     try:
                         response = client.chat.completions.create(
                             model=model,
                             messages=[{"role": "user", "content": prompt.replace(text, truncated_text)}],
                             temperature=0.3,
-                            max_tokens=800,
+                            max_tokens=1500,
                         )
                         return response.choices[0].message.content
                     except Exception as inner_e:

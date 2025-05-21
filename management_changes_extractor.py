@@ -8,22 +8,18 @@ from openai import OpenAI
 import time
 import textwrap
 
-st.set_page_config(page_title="Flexible 8-K Data Extractor", layout="centered")
-st.title("📄 Flexible 8-K Data Extractor")
-
-# Inputs
+# Inputs - keeping it simple like the original
 ticker = st.text_input("Enter Stock Ticker (e.g., MSFT, ORCL)", "MSFT").upper()
 api_key = st.text_input("Enter OpenAI API Key", type="password")
 
-# New input for data extraction specification
-st.subheader("📊 Data Extraction Configuration")
+# NEW: Data extraction specification
+st.subheader("📊 What data do you want to extract?")
 extraction_type = st.text_input(
-    "What data do you want to extract from 8-K filings?", 
+    "Data to extract from 8-K filings", 
     "Total transaction data",
-    help="Examples: 'Total transaction data', 'Management changes', 'Acquisition details', 'Financial metrics', 'Legal proceedings', etc."
+    help="Examples: 'Total transaction data', 'Management changes', 'Acquisition details', 'Financial metrics', 'Legal proceedings'"
 )
 
-# Additional context for better extraction
 extraction_context = st.text_area(
     "Additional context or specific fields (optional)",
     placeholder="e.g., 'Include transaction amounts, dates, parties involved' or 'Focus on dollar amounts, effective dates, and counterparties'",

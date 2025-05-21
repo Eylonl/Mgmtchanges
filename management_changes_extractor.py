@@ -8,7 +8,10 @@ from openai import OpenAI
 import time
 import textwrap
 
-# Inputs - keeping it simple like the original
+st.set_page_config(page_title="Flexible 8-K Data Extractor", layout="centered")
+st.title("📄 Flexible 8-K Data Extractor")
+
+# Inputs
 ticker = st.text_input("Enter Stock Ticker (e.g., MSFT, ORCL)", "MSFT").upper()
 api_key = st.text_input("Enter OpenAI API Key", type="password")
 
@@ -234,9 +237,6 @@ def extract_relevant_sections(text, extraction_type):
     Extract potentially relevant sections from 8-K text based on the extraction type.
     Uses a lightweight approach to identify relevant content for the LLM.
     """
-    # Split text into sections by common 8-K item patterns
-    sections = re.split(r'(?i)Item\s+\d+\.\d+', text)
-    
     # Always include the full document but limit to reasonable size to avoid token limits
     if len(text) > 12000:
         # Take first part and last part to capture summary and details

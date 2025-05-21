@@ -8,27 +8,12 @@ from openai import OpenAI
 import time
 import textwrap
 
-st.set_page_config(page_title="Flexible 8-K Data Extractor", layout="centered")
-st.title("📄 Flexible 8-K Data Extractor")
+st.set_page_config(page_title="Management Changes Summary Extractor", layout="centered")
+st.title("📄 Management Changes Summary Extractor")
 
 # Inputs
 ticker = st.text_input("Enter Stock Ticker (e.g., MSFT, ORCL)", "MSFT").upper()
 api_key = st.text_input("Enter OpenAI API Key", type="password")
-
-# NEW: Data extraction specification
-st.subheader("📊 What data do you want to extract?")
-extraction_type = st.text_input(
-    "Data to extract from 8-K filings", 
-    "Total transaction data",
-    help="Examples: 'Total transaction data', 'Management changes', 'Acquisition details', 'Financial metrics', 'Legal proceedings'"
-)
-
-extraction_context = st.text_area(
-    "Additional context or specific fields (optional)",
-    placeholder="e.g., 'Include transaction amounts, dates, parties involved' or 'Focus on dollar amounts, effective dates, and counterparties'",
-    help="Provide specific details about what information you want captured"
-)
-
 year_input = st.text_input("How many years back to search? (Leave blank for most recent only)", "")
 quarter_input = st.text_input("OR enter specific quarter (e.g., 2Q25, Q4FY24)", "")
 model_choice = st.selectbox("Select OpenAI Model", ["gpt-3.5-turbo", "gpt-4-turbo", "gpt-4"], index=0)
@@ -232,54 +217,88 @@ def determine_fiscal_quarter(date_str, fiscal_year_end_month):
     fiscal_year_short = fiscal_year % 100
     return f"Q{quarter_num} FY{fiscal_year_short}"
 
-def extract_relevant_sections(text, extraction_type):
-    """
-    Extract potentially relevant sections from 8-K text based on the extraction type.
-    Uses a lightweight approach to identify relevant content for the LLM.
-    """
-    # Always include the full document but limit to reasonable size to avoid token limits
-    if len(text) > 12000:
-        # Take first part and last part to capture summary and details
-        relevant_text = text[:8000] + "\n\n...[middle content truncated]...\n\n" + text[-4000:]
-    else:
-        relevant_text = text
+def find_management_change_paragraphs(text):
+    # First, try to extract Item 5.02 section which is specifically for management changes
+    item_502_pattern = re.compile(r'(?i)Item\s+5\.02.+?(?=Item\s+\d\.\d{2}|$)', re.DOTALL)
+    match = item_502_pattern.search(text)
     
-    return relevant_text
-
-def extract_data_with_llm(text, ticker, client, fiscal_quarter, extraction_type, extraction_context="", model="gpt-3.5-turbo"):
-    """
-    Generic function to extract any specified data from 8-K filings using LLM.
-    """
+    if match:
+        section_text = match.group(0)
+        # Limit to a reasonable length (8000 chars) to avoid token limits
+        if len(section_text) > 8000:
+            section_text = section_text[:8000] + "...[truncated for length]"
+        return section_text, True
     
-    # Build the prompt dynamically based on user input
-    context_instruction = f"\nAdditional focus: {extraction_context}" if extraction_context.strip() else ""
+    # If Item 5.02 section not found, use keyword search as fallback
+    management_change_patterns = [
+        r'(?i)appoint(?:ed|ment|ing|s)?',
+        r'(?i)nam(?:ed|ing|es) .* (?:as|to)',
+        r'(?i)(?:new|interim|acting) (?:CEO|CFO|COO|CTO|CMO|president|chief|officer|director)',
+        r'(?i)(?:CEO|CFO|COO|CTO|CMO|president|chief|officer|director) transition',
+        r'(?i)(?:management|leadership|executive) (?:change|transition|appointment)',
+        r'(?i)(?:resignation|resigned|retiring|retire|departure) of (?:CEO|CFO|COO|CTO|CMO|president|chief|officer|director)',
+        r'(?i)promot(?:ed|ion|ing)',
+        r'(?i)succeed(?:ed|ing|s)? (?:as|to)',
+        r'(?i)(?:change|new) (?:of|in) leadership',
+        r'(?i)(?:CEO|CFO|COO|CTO|CMO|president|chief|officer|director) (?:search|succession)',
+        r'(?i)step(?:ping|ped) down',
+        r'(?i)(?:join|joined) (?:the|as)',
+        r'(?i)(?:board|executive|management) (?:appointment|change)',
+        r'(?i)(?:hire|hired|hiring) (?:as|to)',
+        r'(?i)(?:elect|elected|electing) (?:as|to)'
+    ]
     
-    prompt = f"""Extract all information related to "{extraction_type}" from this SEC 8-K filing for {ticker} (Quarter: {fiscal_quarter}).{context_instruction}
+    paragraphs = re.split(r'\n\s*\n|\.\s+(?=[A-Z])', text)
+    management_change_paragraphs = []
+    
+    for para in paragraphs:
+        if any(re.search(pattern, para) for pattern in management_change_patterns):
+            management_change_paragraphs.append(para)
+    
+    found_paragraphs = len(management_change_paragraphs) > 0
+    
+    formatted_paragraphs = "\n\n".join(management_change_paragraphs)
+    
+    # Limit to a reasonable length (8000 chars) to avoid token limits
+    if len(formatted_paragraphs) > 8000:
+        formatted_paragraphs = formatted_paragraphs[:8000] + "...[truncated for length]"
+    
+    if management_change_paragraphs:
+        formatted_paragraphs = (
+            f"DOCUMENT TYPE: SEC 8-K Filing for {ticker}\n\n"
+            f"POTENTIAL MANAGEMENT CHANGE INFORMATION (extracted from full document):\n\n{formatted_paragraphs}\n\n"
+            "Note: These are selected paragraphs that may contain information about executive management transitions and changes."
+        )
+    
+    return formatted_paragraphs, found_paragraphs
 
-Please analyze the document thoroughly and identify any information that relates to: {extraction_type}
+def extract_management_changes(text, ticker, client, fiscal_quarter, model="gpt-3.5-turbo"):
+    # Create a shorter prompt to reduce token count
+    prompt = f"""Extract ALL management change information in this 8-K filing for {ticker} (Quarter: {fiscal_quarter}).
+Focus only on executive management transitions, new appointments, resignations, retirements, and board changes.
 
-For each relevant item found, extract the following details:
-- Category: What type of information this is
-- Description: Brief description of the item/event
-- Key Details: Important specifics (amounts, dates, parties, etc.)
-- Effective Date: When applicable (in MM/DD/YYYY format)
-- Additional Context: Any other relevant information
+For each change, identify:
+- Type (Appointment, Resignation, Retirement, Promotion, Other)
+- Name of Executive
+- New Role (if applicable)
+- Previous Role (if applicable) 
+- Effective Date (in MM/DD/YYYY format when available)
+- Key Details (background, reason for change)
 
-FORMAT: Return each item as a JSON object with these exact fields:
+FORMAT: Return each management change as a JSON object with the fields above. Use this exact format:
 {{
-  "category": "Type/Category of information",
-  "description": "Brief description",
-  "key_details": "Important specifics",
-  "effective_date": "MM/DD/YYYY or Not Specified",
-  "additional_context": "Other relevant details"
+  "type": "Appointment/Resignation/etc",
+  "name": "Executive Name",
+  "new_role": "New Position",
+  "previous_role": "Previous Position",
+  "effective_date": "MM/DD/YYYY",
+  "details": "Brief background/reason"
 }}
 
-If multiple items are found, separate each JSON object with triple hyphens (---).
-If no relevant information is found, respond with "No {extraction_type.lower()} information found."
+If multiple changes, separate each JSON object with triple hyphens (---).
+If no management changes are found, respond with "No management changes found."
 
-Be thorough and look for any information that could be related to "{extraction_type}", even if it's not explicitly labeled as such.
-
-DOCUMENT TEXT:
+TEXT:
 {text}"""
 
     # Add retry logic for API rate limits
@@ -291,8 +310,8 @@ DOCUMENT TEXT:
             response = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.2,
-                max_tokens=2000,
+                temperature=0.3,
+                max_tokens=1500,  # Limit response size
             )
             return response.choices[0].message.content
         except Exception as e:
@@ -314,8 +333,8 @@ DOCUMENT TEXT:
                         response = client.chat.completions.create(
                             model=model,
                             messages=[{"role": "user", "content": prompt.replace(text, truncated_text)}],
-                            temperature=0.2,
-                            max_tokens=2000,
+                            temperature=0.3,
+                            max_tokens=1500,
                         )
                         return response.choices[0].message.content
                     except Exception as inner_e:
@@ -325,14 +344,11 @@ DOCUMENT TEXT:
                 else:
                     break
     
-    st.error("Failed to extract data after multiple attempts")
-    return f"No {extraction_type.lower()} information could be extracted due to API limitations. Try again later or with a different model."
+    st.error("Failed to extract management changes after multiple attempts")
+    return "No management changes could be extracted due to API limitations. Try again later or with a different model."
 
-def parse_extracted_data_to_df(text, fiscal_quarter, extraction_type):
-    """
-    Parse LLM response into a pandas DataFrame with flexible structure.
-    """
-    if not text or f"No {extraction_type.lower()}" in text.lower():
+def parse_management_changes_to_df(text, fiscal_quarter):
+    if not text or "No management changes" in text:
         return None
     
     data = []
@@ -353,51 +369,93 @@ def parse_extracted_data_to_df(text, fiscal_quarter, extraction_type):
                 # Parse the JSON
                 item = json.loads(json_str)
                 
-                # Standardize the item with our expected fields
+                # Standardize keys
                 standardized_item = {
                     "Fiscal Quarter": fiscal_quarter,
-                    "Category": item.get("category", "Not Specified"),
-                    "Description": item.get("description", "Not Specified"),
-                    "Key Details": item.get("key_details", "Not Specified"),
+                    "Type": item.get("type", "Not Specified"),
+                    "Name of Executive": item.get("name", "Not Specified"),
+                    "New Role": item.get("new_role", "Not Specified"),
+                    "Previous Role": item.get("previous_role", "Not Specified"),
                     "Effective Date": item.get("effective_date", "Not Specified"),
-                    "Additional Context": item.get("additional_context", "Not Specified")
+                    "Other Key Details": item.get("details", "Not Specified")
                 }
                 
                 data.append(standardized_item)
-                
             except json.JSONDecodeError:
-                # If JSON parsing fails, store as raw info
-                if json_str.strip():
-                    item = {
-                        "Fiscal Quarter": fiscal_quarter,
-                        "Category": "Raw Data",
-                        "Description": json_str.strip()[:200] + "..." if len(json_str.strip()) > 200 else json_str.strip(),
-                        "Key Details": "See Description",
-                        "Effective Date": "Not Specified",
-                        "Additional Context": json_str.strip()
-                    }
+                # If JSON parsing fails, fall back to regex parsing for this entry
+                item = {"Fiscal Quarter": fiscal_quarter, "Raw Info": json_str}
+                
+                # Try to identify type
+                if re.search(r'(?i)appoint|promot|nam[ed]|hir[ed]|join', json_str):
+                    item["Type"] = "Appointment"
+                elif re.search(r'(?i)resign|step down|depart', json_str):
+                    item["Type"] = "Resignation"
+                elif re.search(r'(?i)retir', json_str):
+                    item["Type"] = "Retirement"
+                else:
+                    item["Type"] = "Other Change"
+                    
+                # Try to extract name
+                name_match = re.search(r'(?:[A-Z][a-z]+ ){1,3}[A-Z][a-z]+', json_str)
+                if name_match:
+                    item["Name of Executive"] = name_match.group(0)
+                    
+                if len(item) > 2:  # More than just Fiscal Quarter and Raw Info
                     data.append(item)
     else:
-        # Handle non-JSON responses by treating as single item
-        if text.strip():
-            item = {
-                "Fiscal Quarter": fiscal_quarter,
-                "Category": extraction_type,
-                "Description": text.strip()[:200] + "..." if len(text.strip()) > 200 else text.strip(),
-                "Key Details": "See Additional Context",
-                "Effective Date": "Not Specified", 
-                "Additional Context": text.strip()
-            }
-            data.append(item)
+        # Fall back to bullet point parsing for backward compatibility
+        bullet_points = re.split(r'\n\s*-\s*|\n\s*•\s*', text)
+        bullet_points = [bp.strip() for bp in bullet_points if bp.strip()]
+        
+        patterns = {
+            "Type": r'(?i)Type:?\s*([A-Za-z\s]+)',
+            "Name of Executive": r'(?i)Name:?\s*([A-Za-z\s\.]+)',
+            "New Role": r'(?i)New Role:?\s*([^,\n]+)',
+            "Previous Role": r'(?i)Previous Role:?\s*([^,\n]+)',
+            "Effective Date": r'(?i)(?:Effective|Date):?\s*([^,\n]+)',
+            "Other Key Details": r'(?i)(?:Other Key Details|Details|Key Details):?\s*(.+)'
+        }
+        
+        for bullet in bullet_points:
+            item = {"Fiscal Quarter": fiscal_quarter}
+            
+            # Check for structured format first
+            for key, pattern in patterns.items():
+                match = re.search(pattern, bullet)
+                if match:
+                    item[key] = match.group(1).strip()
+            
+            # If no structured data was found, try to extract as best as possible
+            if len(item) <= 1:  # Only has Fiscal Quarter
+                item["Raw Info"] = bullet
+                
+                # Try to identify type
+                if re.search(r'(?i)appoint|promot|nam[ed]|hir[ed]|join', bullet):
+                    item["Type"] = "Appointment"
+                elif re.search(r'(?i)resign|step down|depart', bullet):
+                    item["Type"] = "Resignation"
+                elif re.search(r'(?i)retir', bullet):
+                    item["Type"] = "Retirement"
+                else:
+                    item["Type"] = "Other Change"
+                    
+                # Try to extract name
+                name_match = re.search(r'(?:[A-Z][a-z]+ ){1,3}[A-Z][a-z]+', bullet)
+                if name_match:
+                    item["Name of Executive"] = name_match.group(0)
+            
+            # Only add if we have at least some useful information
+            if len(item) > 2:  # More than just Fiscal Quarter and Raw Info
+                data.append(item)
     
     # Create DataFrame
     if data:
         df = pd.DataFrame(data)
         
-        # Ensure all required columns exist
+        # Ensure required columns exist
         required_columns = [
-            "Fiscal Quarter", "Category", "Description", "Key Details", 
-            "Effective Date", "Additional Context"
+            "Type", "Name of Executive", "New Role", "Previous Role", 
+            "Effective Date", "Other Key Details", "Fiscal Quarter"
         ]
         
         for col in required_columns:
@@ -405,20 +463,22 @@ def parse_extracted_data_to_df(text, fiscal_quarter, extraction_type):
                 df[col] = "Not Specified"
                 
         # Reorder columns
-        df = df[required_columns]
+        df = df[["Fiscal Quarter"] + [col for col in required_columns if col != "Fiscal Quarter"]]
         
-        # Remove duplicate rows
+        # Remove duplicate rows based on all columns except Filing Date and 8K Link
+        # since those are added later
         df = df.drop_duplicates()
         
         return df
     else:
         return None
 
-if st.button("🔍 Extract Data from 8-K Filings"):
+# Remove the install_required_packages function entirely since we don't need it anymore
+
+
+if st.button("🔍 Extract Management Changes"):
     if not api_key:
         st.error("Please enter your OpenAI API key.")
-    elif not extraction_type.strip():
-        st.error("Please specify what data you want to extract.")
     else:
         cik = lookup_cik(ticker)
         if not cik:
@@ -450,10 +510,6 @@ if st.button("🔍 Extract Data from 8-K Filings"):
             # Create progress bar
             progress_bar = st.progress(0)
             
-            st.info(f"🔍 Looking for: **{extraction_type}**")
-            if extraction_context:
-                st.info(f"📋 Additional context: {extraction_context}")
-            
             with st.spinner("Processing 8-K filings..."):
                 # Process each filing
                 for i, (date_str, acc, url) in enumerate(links):
@@ -471,38 +527,38 @@ if st.button("🔍 Extract Data from 8-K Filings"):
                             response = requests.get(url, headers={"User-Agent": "Financial Research contact@example.com"})
                             text = response.text
                             
-                            # Extract relevant sections
-                            relevant_text = extract_relevant_sections(text, extraction_type)
+                            # Find paragraphs containing management change patterns
+                            management_paragraphs, found_management = find_management_change_paragraphs(text)
                             
-                            # Extract data using LLM
-                            with st.spinner(f"Extracting {extraction_type} using AI..."):
-                                extracted_data = extract_data_with_llm(
-                                    relevant_text, 
-                                    ticker, 
-                                    client, 
-                                    fiscal_quarter,
-                                    extraction_type,
-                                    extraction_context,
-                                    model=model_choice
-                                )
-                            
-                            if extracted_data and f"No {extraction_type.lower()}" not in extracted_data.lower():
-                                # Parse to DataFrame
-                                df = parse_extracted_data_to_df(extracted_data, fiscal_quarter, extraction_type)
+                            if found_management:
+                                st.success("✅ Found potential management change information")
                                 
-                                if df is not None:
-                                    # Add metadata
-                                    df["Filing Date"] = date_str
-                                    df["8K Link"] = url
-                                    results.append(df)
-                                    st.success(f"✅ {extraction_type} data extracted from this 8-K")
+                                # Extract management changes from the highlighted text
+                                with st.spinner("Extracting management changes using AI..."):
+                                    management_changes = extract_management_changes(
+                                        management_paragraphs, 
+                                        ticker, 
+                                        client, 
+                                        fiscal_quarter,
+                                        model=model_choice
+                                    )
+                                
+                                if management_changes and "No management changes" not in management_changes:
+                                    # Parse to DataFrame
+                                    df = parse_management_changes_to_df(management_changes, fiscal_quarter)
                                     
-                                    # Show preview of extracted data
-                                    st.dataframe(df.drop(columns=["Filing Date", "8K Link"]), use_container_width=True)
+                                    if df is not None:
+                                        # Add metadata
+                                        df["Filing Date"] = date_str
+                                        df["8K Link"] = url
+                                        results.append(df)
+                                        st.success("✅ Management changes extracted from this 8-K")
+                                    else:
+                                        st.warning("⚠️ No structured management change data found")
                                 else:
-                                    st.warning("⚠️ No structured data found")
+                                    st.info("ℹ️ No management changes found in this filing")
                             else:
-                                st.info(f"ℹ️ No {extraction_type.lower()} information found in this filing")
+                                st.info("ℹ️ No management change information detected in this filing")
                                 
                         except Exception as e:
                             st.error(f"❌ Could not process: {url}. Error: {str(e)}")
@@ -514,34 +570,24 @@ if st.button("🔍 Extract Data from 8-K Filings"):
                 # Combine all results
                 combined = pd.concat(results, ignore_index=True)
                 
-                # Display summary
-                st.subheader(f"📊 Extracted {extraction_type} Data")
-                st.write(f"Found **{len(combined)}** relevant items across **{len(results)}** filings")
+                # Preview the table with filters
+                st.subheader("Management Changes")
                 
-                # Display the combined table
-                st.dataframe(combined, use_container_width=True)
+                # Apply filters
+                filtered_df = combined.copy()
                 
-                # Download button
+                # Display the filtered table
+                st.dataframe(filtered_df, use_container_width=True)
+                
+                # Add single download button
                 import io
                 csv_buffer = io.StringIO()
                 combined.to_csv(csv_buffer, index=False)
                 st.download_button(
                     "📥 Download CSV", 
                     data=csv_buffer.getvalue(), 
-                    file_name=f"{ticker}_{extraction_type.replace(' ', '_').lower()}_data.csv", 
+                    file_name=f"{ticker}_management_changes.csv", 
                     mime="text/csv"
                 )
-                
-                # Show summary statistics
-                with st.expander("📈 Summary Statistics", expanded=False):
-                    st.write(f"**Total Items Found:** {len(combined)}")
-                    st.write(f"**Filings Processed:** {len(links)}")
-                    st.write(f"**Filings with Data:** {len(results)}")
-                    
-                    if "Category" in combined.columns:
-                        category_counts = combined["Category"].value_counts()
-                        st.write("**Data by Category:**")
-                        st.dataframe(category_counts)
-                        
             else:
-                st.warning(f"No {extraction_type.lower()} data extracted from any of the filings.")
+                st.warning("No management change data extracted from any of the filings.")
